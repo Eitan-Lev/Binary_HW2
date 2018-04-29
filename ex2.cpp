@@ -1,6 +1,6 @@
 
 //
-// This tool counts the number of times a routine is executed and 
+// This tool counts the number of times a routine is executed and
 // the number of instructions executed in a routine
 //
 
@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string.h>
 #include "pin.H"
+#include <map>
 
 ofstream outFile;
 
@@ -24,6 +25,20 @@ typedef struct RtnCount
     struct RtnCount * _next;
 } RTN_COUNT;
 
+//TODO add info
+typedef struct LoopStruct
+{
+    RTN_COUNT* _rtnCount;
+    UINT64 _countSeen;
+    UINT64 _countInvoked;
+    // UINT64 _countSum;//FIXME
+    UINT64 _countCurrTaken;
+    UINT64 _countPrevTaken;
+    UINT64 _countDiff;
+} LOOP_DATA;
+
+map<ADDRINT,LOOP_DATA*> LoopMap;
+
 // Linked list of instruction counts for each routine
 RTN_COUNT * RtnList = 0;
 
@@ -32,7 +47,21 @@ VOID docount(UINT64 * counter)
 {
     (*counter)++;
 }
-    
+
+void doCountBranch(bool isTaken, UINT64* countSeen, UINT64* countCurrTaken, UINT64* countPrevTaken, UINT64* countInvoked, UINT64* countDiff)
+{
+  if(isTaken) {
+    (*countSeen)++;
+    (*countCurrTaken)++;
+  } else {
+    (*countInvoked)++;
+    if((*countCurrTaken) != (*countPrevTaken)) {
+      (*countDiff)++;
+    }
+    (*countPrevTaken) = (*countCurrTaken);
+  }
+}
+
 const char * StripPath(const char * path)
 {
     const char * file = strrchr(path,'/');
@@ -45,7 +74,7 @@ const char * StripPath(const char * path)
 // Pin calls this function every time a new rtn is executed
 VOID Routine(RTN rtn, VOID *v)
 {
-    
+
     // Allocate a counter for this routine
     RTN_COUNT * rc = new RTN_COUNT;
 
@@ -60,17 +89,39 @@ VOID Routine(RTN rtn, VOID *v)
     // Add to list of routines
     rc->_next = RtnList;
     RtnList = rc;
-            
+
     RTN_Open(rtn);
-    
+
     // For each instruction of the routine
     for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins))
     {
         // Insert a call to docount to increment the instruction counter for this rtn
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)docount, IARG_PTR, &(rc->_icount), IARG_END);
+        if(INS_IsDirectBranch(ins))
+        {
+          map<ADDRINT,LoopStruct*>::iterator iter;
+          iter = LoopMap.find(INS_Address(ins));
+          LoopStruct * ls;
+          if (iter == LoopMap.end()){
+            ls = new LoopStruct;
+            ls->_rtnCount = rc;
+            ls->_countSeen = 0;
+            ls->_countCurrTaken = 0;
+            ls->_countPrevTaken = -1;//Max size possible
+            ls->_countDiff = 0;
+            ls->_countInvoked = 0;
+          } else {
+            ls = iter->second;//TODO should not reach here
+            exit(1);
+          }
+          INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)doCountBranch,
+            IARG_BRANCH_TAKEN, IARG_PTR, &(ls->_countSeen), IARG_PTR, &(ls->_countCurrTaken)
+            , IARG_PTR, &(ls->_countPrevTaken), IARG_PTR, &(ls->_countInvoked)
+            , IARG_PTR, &(ls->_countDiff), IARG_END);//TODO fix IPOINT
+        }
     }
 
-    
+
     RTN_Close(rtn);
 }
 
@@ -100,14 +151,14 @@ RTN_COUNT* popMaxRoutine(){
         }
 		rc = rc->_next;
 	}
-	if(prev){ 
+	if(prev){
 		prev->_next = max_routine->_next;
 	}else{ //first element is maximal
 		RtnList = RtnList->_next;
 	}
-	
+
 	return max_routine;
-	
+
 }
 
 
@@ -160,9 +211,9 @@ int main(int argc, char * argv[])
 
     // Register Fini to be called when the application exits
     PIN_AddFiniFunction(Fini, 0);
-    
+
     // Start the program, never returns
     PIN_StartProgram();
-    
+
     return 0;
 }
